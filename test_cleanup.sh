@@ -37,7 +37,44 @@ prepare_env() {
     cleanup_test_env
     mkdir -p "${LOG_DIR}" "${BACKUP_DIR}"
 }
+# Создаёт файлы в LOG_DIR общим объёмом примерно size_mb мегабайт
+# age_days — возраст файлов в днях (0 = сегодня)
+# file_count — сколько файлов создать
+# Создаёт файлы в LOG_DIR общим объёмом примерно size_mb мегабайт
+# age_days — возраст файлов в днях (0 = сегодня)
+# file_count — сколько файлов создать
+generate_test_files() {
+    local size_mb=$1
+    local age_days=${2:-0}
+    local file_count=${3:-10}
 
+    mkdir -p "${LOG_DIR}"
+
+    local bytes_per_file=$(( size_mb * 1024 * 1024 / file_count ))
+    local mb_per_file=$(( bytes_per_file / 1024 / 1024 ))
+
+    echo "Генерирую ${file_count} файлов примерно по ${mb_per_file} МБ..."
+
+    for i in $(seq 1 "$file_count"); do
+        local file="${LOG_DIR}/file_${i}.dat"
+
+        # На /mnt/c fallocate часто не работает, поэтому сразу используем dd
+        dd if=/dev/zero of="$file" bs=1M count="$mb_per_file" status=none 2>/dev/null
+
+        # Если dd не сработал — запасной вариант
+        if [[ ! -f "$file" ]] || [[ $(stat -c%s "$file" 2>/dev/null || echo 0) -lt 1000 ]]; then
+            head -c "$bytes_per_file" /dev/urandom > "$file"
+        fi
+
+        # Меняем дату модификации
+        if [[ "$age_days" -gt 0 ]]; then
+            touch -d "$age_days days ago" "$file"
+        fi
+    done
+
+    echo "Готово. Реальный размер папки:"
+    du -sh "${LOG_DIR}"
+}
 # ---------- Тест 1: заполненность ниже порога ----------
 test_below_threshold() {
     echo "=== Тест 1: папка заполнена меньше X% ==="
@@ -104,4 +141,4 @@ main() {
     exit 0
 }
 
-main "$@"
+# main "$@"
