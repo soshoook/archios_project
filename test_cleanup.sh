@@ -40,9 +40,6 @@ prepare_env() {
 # Создаёт файлы в LOG_DIR общим объёмом примерно size_mb мегабайт
 # age_days — возраст файлов в днях (0 = сегодня)
 # file_count — сколько файлов создать
-# Создаёт файлы в LOG_DIR общим объёмом примерно size_mb мегабайт
-# age_days — возраст файлов в днях (0 = сегодня)
-# file_count — сколько файлов создать
 generate_test_files() {
     local size_mb=$1
     local age_days=${2:-0}
@@ -58,10 +55,10 @@ generate_test_files() {
     for i in $(seq 1 "$file_count"); do
         local file="${LOG_DIR}/file_${i}.dat"
 
-        # На /mnt/c fallocate часто не работает, поэтому сразу используем dd
+        # На /mnt/c fallocate часто не работает, поэтому сразу использую dd
         dd if=/dev/zero of="$file" bs=1M count="$mb_per_file" status=none 2>/dev/null
 
-        # Если dd не сработал — запасной вариант
+        # Если dd не сработал. запасной вариант
         if [[ ! -f "$file" ]] || [[ $(stat -c%s "$file" 2>/dev/null || echo 0) -lt 1000 ]]; then
             head -c "$bytes_per_file" /dev/urandom > "$file"
         fi
