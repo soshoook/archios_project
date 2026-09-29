@@ -21,7 +21,23 @@ if "%THRESHOLD%"=="" (
     exit /b 1
 )
 
-REM проверка
+REM выдает насколько занят/свободен вирт диск и превосходит ли это порог
+set DRIVE_LETTER=%FOLDER:~0,1%
+
+for /f %%A in ('powershell -Command "(Get-PSDrive %DRIVE_LETTER%).Free"') do set FREE=%%A
+for /f %%A in ('powershell -Command "(Get-PSDrive %DRIVE_LETTER%).Used"') do set USED=%%A
+
+set /a FREE_KB=FREE/1024
+set /a USED_KB=USED/1024
+set /a TOTAL_KB=FREE_KB+USED_KB
+set /a USAGE=USED_KB*100/TOTAL_KB
+
 echo Folder: %FOLDER%
-echo Threshold: %THRESHOLD%%%
-echo Arguments accepted correctly.
+echo Usage: %USAGE%%%; threshold: %THRESHOLD%%%
+
+if %USAGE% GTR %THRESHOLD% (
+    echo Threshold exceeded: cleanup needed.
+) else (
+    echo Threshold not exceeded: nothing to do.
+    exit /b 0
+)
