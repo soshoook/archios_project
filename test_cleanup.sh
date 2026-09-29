@@ -40,6 +40,9 @@ prepare_env() {
 # Создаёт файлы в LOG_DIR общим объёмом примерно size_mb мегабайт
 # age_days — возраст файлов в днях (0 = сегодня)
 # file_count — сколько файлов создать
+# Создаёт файлы в LOG_DIR общим объёмом примерно size_mb мегабайт
+# age_days — возраст файлов в днях (0 = сегодня)
+# file_count — сколько файлов создать
 generate_test_files() {
     local size_mb=$1
     local age_days=${2:-0}
@@ -55,10 +58,10 @@ generate_test_files() {
     for i in $(seq 1 "$file_count"); do
         local file="${LOG_DIR}/file_${i}.dat"
 
-        # На /mnt/c fallocate часто не работает, поэтому сразу использую dd
+        # На /mnt/c fallocate часто не работает, поэтому сразу используем dd
         dd if=/dev/zero of="$file" bs=1M count="$mb_per_file" status=none 2>/dev/null
 
-        # Если dd не сработал. запасной вариант
+        # Если dd не сработал — запасной вариант
         if [[ ! -f "$file" ]] || [[ $(stat -c%s "$file" 2>/dev/null || echo 0) -lt 1000 ]]; then
             head -c "$bytes_per_file" /dev/urandom > "$file"
         fi
@@ -73,19 +76,48 @@ generate_test_files() {
     du -sh "${LOG_DIR}"
 }
 # ---------- Тест 1: заполненность ниже порога ----------
+# Ожидаем: скрипт ничего не делает, файлы остаются, архивов нет
 test_below_threshold() {
     echo "=== Тест 1: папка заполнена меньше X% ==="
+
+    # 1. Готовим чистое окружение
     prepare_env
 
-    # Здесь потом создадим файлы так, чтобы было < X%
-    # Пока заглушка
+    # 2. Кладём немного файлов (точно меньше любого разумного порога)
+    generate_test_files 50 0 5   # ~50 МБ, 5 файлов, сегодняшние
 
-    # Запуск cleanup.sh
-    # Проверка: архивов нет, файлы на месте
+    # 3. Запоминаем, сколько файлов было до запуска
+    local files_before
+    files_before=$(find "${LOG_DIR}" -type f | wc -l)
 
-    print_pass "Тест 1 (заглушка) — ниже порога"
+    # 4. Запускаем cleanup.sh с высоким порогом (90%)
+    #    На обычном диске 50 МБ — это очень мало, порог точно не превышен
+    if ! bash "${CLEANUP_SCRIPT}" "${LOG_DIR}" 90; then
+        print_fail "Скрипт завершился с ошибкой (а не должен был)"
+        return
+    fi
+
+    # 5. Проверяем, что файлы на месте
+    local files_after
+    files_after=$(find "${LOG_DIR}" -type f | wc -l)
+
+    if [[ "$files_after" -ne "$files_before" ]]; then
+        print_fail "Количество файлов изменилось (было $files_before, стало $files_after)"
+        return
+    fi
+
+    # 6. Проверяем, что архивов не появилось
+    local archives
+    archives=$(find "${BACKUP_DIR}" -type f 2>/dev/null | wc -l)
+
+    if [[ "$archives" -gt 0 ]]; then
+        print_fail "Появились архивы, хотя порог не был превышен"
+        return
+    fi
+
+    # 7. Всё хорошо
+    print_pass "Ниже порога — ничего не изменилось"
 }
-
 # ---------- Тест 2: превышен порог ----------
 test_above_threshold() {
     echo "=== Тест 2: папка заполнена больше X% ==="
@@ -138,4 +170,4 @@ main() {
     exit 0
 }
 
-# main "$@"
+main "$@"
