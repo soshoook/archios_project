@@ -214,12 +214,137 @@ test_above_threshold() {
 
 test_oldest_first() {
     echo "=== Тест 3: архивируются самые старые файлы ==="
-    print_pass "Тест 3 (заглушка) — порядок"
+
+    # Диск 1 ГБ
+    setup_test_disks 1024 512
+
+    # Создаём 6 файлов вручную с разным возрастом
+    # Старые (должны удалиться):
+    dd if=/dev/zero of="${LOG_DIR}/old_1.dat" bs=1M count=150 status=none
+    touch -d "10 days ago" "${LOG_DIR}/old_1.dat"
+
+    dd if=/dev/zero of="${LOG_DIR}/old_2.dat" bs=1M count=150 status=none
+    touch -d "9 days ago" "${LOG_DIR}/old_2.dat"
+
+    dd if=/dev/zero of="${LOG_DIR}/old_3.dat" bs=1M count=150 status=none
+    touch -d "8 days ago" "${LOG_DIR}/old_3.dat"
+
+    # Новые (должны остаться):
+    dd if=/dev/zero of="${LOG_DIR}/new_1.dat" bs=1M count=150 status=none
+    touch -d "1 day ago" "${LOG_DIR}/new_1.dat"
+
+    dd if=/dev/zero of="${LOG_DIR}/new_2.dat" bs=1M count=150 status=none
+    touch -d "2 hours ago" "${LOG_DIR}/new_2.dat"
+
+    dd if=/dev/zero of="${LOG_DIR}/new_3.dat" bs=1M count=150 status=none
+    # сегодняшний
+
+    echo "Созданные файлы:"
+    ls -l --time-style=long-iso "${LOG_DIR}" 2>/dev/null || ls -l "${LOG_DIR}"
+
+    # Запускаем с порогом 40% (нужно будет удалить часть файлов)
+    if ! BACKUP_DIR="${BACKUP_DIR}" bash "${CLEANUP_SCRIPT}" "${LOG_DIR}" 40; then
+        print_fail "Скрипт завершился с ошибкой"
+        cleanup_test_env
+        return
+    fi
+
+    # Проверяем: старые файлы должны исчезнуть
+    local old_left=0
+    for f in old_1.dat old_2.dat old_3.dat; do
+        if [[ -f "${LOG_DIR}/${f}" ]]; then
+            ((old_left++)) || true
+        fi
+    done
+
+    # Новые файлы должны остаться
+    local new_left=0
+    for f in new_1.dat new_2.dat new_3.dat; do
+        if [[ -f "${LOG_DIR}/${f}" ]]; then
+            ((new_left++)) || true
+        fi
+    done
+
+    local archives
+    archives=$(count_archives "${BACKUP_DIR}")
+
+    echo "Старых файлов осталось: ${old_left}, новых: ${new_left}, архивов: ${archives}"
+
+    if [[ "${old_left}" -gt 0 ]]; then
+        print_fail "Старые файлы не были удалены (осталось ${old_left})"
+        cleanup_test_env
+        return
+    fi
+
+    if [[ "${new_left}" -lt 2 ]]; then
+        print_fail "Слишком много новых файлов удалено (осталось ${new_left})"
+        cleanup_test_env
+        return
+    fi
+
+    if [[ "${archives}" -lt 1 ]]; then
+        print_fail "Архив не создан"
+        cleanup_test_env
+        return
+    fi
+
+    print_pass "Удалены именно самые старые файлы"
+    cleanup_test_env
 }
 
 test_different_x() {
     echo "=== Тест 4: другое значение X ==="
-    print_pass "Тест 4 (заглушка) — другой X"
+
+    setup_test_disks 1024 512
+    generate_test_files 700 3 7
+
+    local files_before
+    files_before=$(count_files "${LOG_DIR}")
+
+    # 1. Высокий порог (95%) — ничего не должно удалиться
+    if ! BACKUP_DIR="${BACKUP_DIR}" bash "${CLEANUP_SCRIPT}" "${LOG_DIR}" 95; then
+        print_fail "Скрипт завершился с ошибкой при высоком пороге"
+        cleanup_test_env
+        return
+    fi
+
+    local files_after_high
+    files_after_high=$(count_files "${LOG_DIR}")
+
+    if [[ "${files_after_high}" -ne "${files_before}" ]]; then
+        print_fail "При высоком пороге файлы изменились"
+        cleanup_test_env
+        return
+    fi
+
+    # 2. Низкий порог (30%) — должно что-то удалиться
+    if ! BACKUP_DIR="${BACKUP_DIR}" bash "${CLEANUP_SCRIPT}" "${LOG_DIR}" 30; then
+        print_fail "Скрипт завершился с ошибкой при низком пороге"
+        cleanup_test_env
+        return
+    fi
+
+    local files_after_low
+    files_after_low=$(count_files "${LOG_DIR}")
+
+    local archives
+    archives=$(count_archives "${BACKUP_DIR}")
+
+    if [[ "${files_after_low}" -ge "${files_before}" ]]; then
+        print_fail "При низком пороге файлы не удалились"
+        cleanup_test_env
+        return
+    fi
+
+    if [[ "${archives}" -lt 1 ]]; then
+        print_fail "Архив не создан при низком пороге"
+        cleanup_test_env
+        return
+    fi
+
+    echo "Было файлов: ${files_before}, после высокого X: ${files_after_high}, после низкого X: ${files_after_low}"
+    print_pass "Разные значения X работают правильно"
+    cleanup_test_env
 }
 
 # ============================================================
