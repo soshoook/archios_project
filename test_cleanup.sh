@@ -364,7 +364,9 @@ main() {
     test_above_threshold
     test_oldest_first
     test_different_x
-
+    test_bad_path
+    test_bad_x
+	
     echo "========================="
     echo "Итого: PASS=${PASS}  FAIL=${FAIL}"
 
@@ -374,6 +376,36 @@ main() {
         exit 1
     fi
     exit 0
+}
+
+test_bad_path() {
+    echo "=== Тест: неверный путь ==="
+    if bash "$CLEANUP_SCRIPT" "/net/takoy/papki" 50 2>/dev/null; then
+        print_fail "Скрипт не должен был успешно завершиться на несуществующем пути"
+    else
+        print_pass "Неверный путь — ошибка обработана"
+    fi
+}
+
+test_bad_x() {
+    echo "=== Тест: неверный X ==="
+    setup_test_disks 512 256
+    generate_test_files 50 0 3
+
+    if BACKUP_DIR="$BACKUP_DIR" bash "$CLEANUP_SCRIPT" "$LOG_DIR" abc 2>/dev/null; then
+        print_fail "Скрипт не должен был принять нечисловой X"
+        cleanup_test_env
+        return
+    fi
+
+    if BACKUP_DIR="$BACKUP_DIR" bash "$CLEANUP_SCRIPT" "$LOG_DIR" 150 2>/dev/null; then
+        print_fail "Скрипт не должен был принять X > 100"
+        cleanup_test_env
+        return
+    fi
+
+    print_pass "Неверный X — ошибка обработана"
+    cleanup_test_env
 }
 
 main "$@"
