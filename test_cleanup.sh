@@ -366,6 +366,7 @@ main() {
     test_different_x
     test_bad_path
     test_bad_x
+    test_archive_fail_keeps_files
 	
     echo "========================="
     echo "Итого: PASS=${PASS}  FAIL=${FAIL}"
@@ -407,5 +408,40 @@ test_bad_x() {
     print_pass "Неверный X — ошибка обработана"
     cleanup_test_env
 }
+# Тест: если архив создать нельзя — файлы в log не удаляются
+test_archive_fail_keeps_files() {
+    echo "=== Тест: ошибка архивации — оригиналы на месте ==="
 
+    setup_test_disks 1024 512
+    generate_test_files 800 5 8
+
+    local before
+    before=$(count_files "${LOG_DIR}")
+
+    # Ломаем возможность писать в папку архивов
+    sudo chmod a-w "${BACKUP_DIR}"
+
+    # Скрипт должен завершиться с ошибкой
+    if BACKUP_DIR="${BACKUP_DIR}" bash "${CLEANUP_SCRIPT}" "${LOG_DIR}" 50 2>/dev/null; then
+        sudo chmod u+w "${BACKUP_DIR}" 2>/dev/null || true
+        print_fail "Скрипт не должен был успешно завершиться"
+        cleanup_test_env
+        return
+    fi
+
+    # Возвращаем права (чтобы cleanup_test_env мог всё убрать)
+    sudo chmod u+w "${BACKUP_DIR}" 2>/dev/null || true
+
+    local after
+    after=$(count_files "${LOG_DIR}")
+
+    if [[ "${after}" -ne "${before}" ]]; then
+        print_fail "Файлы изменились при ошибке архивации (было ${before}, стало ${after})"
+        cleanup_test_env
+        return
+    fi
+
+    print_pass "При ошибке архивации оригиналы не удалены"
+    cleanup_test_env
+}
 main "$@"
