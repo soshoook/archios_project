@@ -1,5 +1,4 @@
 #!/bin/bash
-
 # test_cleanup.sh — автоматические тесты для cleanup.sh
 # Минимум 4 теста, каждый с папкой ≥ 0.5 GB
 
@@ -8,41 +7,104 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLEANUP_SCRIPT="${SCRIPT_DIR}/cleanup.sh"
 TEST_ROOT="${SCRIPT_DIR}/test_env"
+
 LOG_DIR="${TEST_ROOT}/log"
 BACKUP_DIR="${TEST_ROOT}/backup"
+LOG_LOOP=""
+BACKUP_LOOP=""
 
 PASS=0
 FAIL=0
 
-# Цвета для вывода
+# Цвета
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 NC='\033[0m'
 
 print_pass() {
     echo -e "${GREEN}[PASS]${NC} $1"
-    ((PASS++))
+    ((PASS++)) || true
 }
 
 print_fail() {
     echo -e "${RED}[FAIL]${NC} $1"
-    ((FAIL++))
+    ((FAIL++)) || true
 }
 
+# Безопасный подсчёт файлов (игнорируем lost+found)
+count_files() {
+    find "$1" -path '*/lost+found' -prune -o -type f -print 2>/dev/null | wc -l
+}
+
+count_archives() {
+    find "$1" -path '*/lost+found' -prune -o -name "*.tar.gz" -print 2>/dev/null | wc -l
+}
+
+# ============================================================
+# Вспомогательные функции
+# ============================================================
+
 cleanup_test_env() {
+    if mountpoint -q "${TEST_ROOT}/log" 2>/dev/null; then
+        sudo umount "${TEST_ROOT}/log" 2>/dev/null || true
+    fi
+    if mountpoint -q "${TEST_ROOT}/backup" 2>/dev/null; then
+        sudo umount "${TEST_ROOT}/backup" 2>/dev/null || true
+    fi
+
+    if [[ -n "${LOG_LOOP}" ]]; then
+        sudo losetup -d "${LOG_LOOP}" 2>/dev/null || true
+        LOG_LOOP=""
+    fi
+    if [[ -n "${BACKUP_LOOP}" ]]; then
+        sudo losetup -d "${BACKUP_LOOP}" 2>/dev/null || true
+        BACKUP_LOOP=""
+    fi
+
     rm -rf "${TEST_ROOT}"
 }
 
-prepare_env() {
-    cleanup_test_env
-    mkdir -p "${LOG_DIR}" "${BACKUP_DIR}"
+create_virtual_disk() {
+    local size_mb=$1
+    local mount_point=$2
+    local image_file="${TEST_ROOT}/$(basename "${mount_point}").img"
+
+    mkdir -p "${mount_point}"
+    mkdir -p "${TEST_ROOT}"
+
+    echo "  → создаю образ ${size_mb} МБ..."
+    dd if=/dev/zero of="${image_file}" bs=1M count="${size_mb}" status=none
+
+    local loop_dev
+    loop_dev=$(sudo losetup -f --show "${image_file}")
+
+    sudo mkfs.ext4 -q "${loop_dev}"
+    sudo mount "${loop_dev}" "${mount_point}"
+    sudo chown "$(whoami):$(whoami)" "${mount_point}"
+    sudo chmod 777 "${mount_point}"
+
+    echo "${loop_dev}"
 }
-# Создаёт файлы в LOG_DIR общим объёмом примерно size_mb мегабайт
-# age_days — возраст файлов в днях (0 = сегодня)
-# file_count — сколько файлов создать
-# Создаёт файлы в LOG_DIR общим объёмом примерно size_mb мегабайт
-# age_days — возраст файлов в днях (0 = сегодня)
-# file_count — сколько файлов создать
+
+setup_test_disks() {
+    local log_size_mb=${1:-1024}
+    local backup_size_mb=${2:-512}
+
+    cleanup_test_env
+    mkdir -p "${TEST_ROOT}"
+
+    LOG_DIR="${TEST_ROOT}/log"
+    BACKUP_DIR="${TEST_ROOT}/backup"
+
+    echo "Создаю диск для логов (${log_size_mb} МБ)..."
+    LOG_LOOP=$(create_virtual_disk "${log_size_mb}" "${LOG_DIR}")
+
+    echo "Создаю диск для архивов (${backup_size_mb} МБ)..."
+    BACKUP_LOOP=$(create_virtual_disk "${backup_size_mb}" "${BACKUP_DIR}")
+
+    export BACKUP_DIR
+}
+
 generate_test_files() {
     local size_mb=$1
     local age_days=${2:-0}
@@ -50,101 +112,245 @@ generate_test_files() {
 
     mkdir -p "${LOG_DIR}"
 
-    local bytes_per_file=$(( size_mb * 1024 * 1024 / file_count ))
-    local mb_per_file=$(( bytes_per_file / 1024 / 1024 ))
+    local mb_per_file=$(( size_mb / file_count ))
+    if (( mb_per_file < 1 )); then
+        mb_per_file=1
+    fi
 
     echo "Генерирую ${file_count} файлов примерно по ${mb_per_file} МБ..."
 
-    for i in $(seq 1 "$file_count"); do
+    for i in $(seq 1 "${file_count}"); do
         local file="${LOG_DIR}/file_${i}.dat"
+        dd if=/dev/zero of="${file}" bs=1M count="${mb_per_file}" status=none 2>/dev/null
 
-        # На /mnt/c fallocate часто не работает, поэтому сразу используем dd
-        dd if=/dev/zero of="$file" bs=1M count="$mb_per_file" status=none 2>/dev/null
-
-        # Если dd не сработал — запасной вариант
-        if [[ ! -f "$file" ]] || [[ $(stat -c%s "$file" 2>/dev/null || echo 0) -lt 1000 ]]; then
-            head -c "$bytes_per_file" /dev/urandom > "$file"
-        fi
-
-        # Меняем дату модификации
-        if [[ "$age_days" -gt 0 ]]; then
-            touch -d "$age_days days ago" "$file"
+        if [[ "${age_days}" -gt 0 ]]; then
+            touch -d "${age_days} days ago" "${file}"
         fi
     done
 
-    echo "Готово. Реальный размер папки:"
-    du -sh "${LOG_DIR}"
+    echo "Готово. Реальный размер:"
+    du -sh "${LOG_DIR}" 2>/dev/null || true
 }
-# ---------- Тест 1: заполненность ниже порога ----------
-# Ожидаем: скрипт ничего не делает, файлы остаются, архивов нет
+
+# ============================================================
+# Тесты
+# ============================================================
+
 test_below_threshold() {
     echo "=== Тест 1: папка заполнена меньше X% ==="
 
-    # 1. Готовим чистое окружение
-    prepare_env
+    setup_test_disks 1024 512
+    generate_test_files 100 0 5
 
-    # 2. Кладём немного файлов (точно меньше любого разумного порога)
-    generate_test_files 50 0 5   # ~50 МБ, 5 файлов, сегодняшние
-
-    # 3. Запоминаем, сколько файлов было до запуска
     local files_before
-    files_before=$(find "${LOG_DIR}" -type f | wc -l)
+    files_before=$(count_files "${LOG_DIR}")
 
-    # 4. Запускаем cleanup.sh с высоким порогом (90%)
-    #    На обычном диске 50 МБ — это очень мало, порог точно не превышен
-    if ! bash "${CLEANUP_SCRIPT}" "${LOG_DIR}" 90; then
-        print_fail "Скрипт завершился с ошибкой (а не должен был)"
+    if ! BACKUP_DIR="${BACKUP_DIR}" bash "${CLEANUP_SCRIPT}" "${LOG_DIR}" 50; then
+        print_fail "Скрипт завершился с ошибкой"
+        cleanup_test_env
         return
     fi
 
-    # 5. Проверяем, что файлы на месте
     local files_after
-    files_after=$(find "${LOG_DIR}" -type f | wc -l)
+    files_after=$(count_files "${LOG_DIR}")
 
-    if [[ "$files_after" -ne "$files_before" ]]; then
-        print_fail "Количество файлов изменилось (было $files_before, стало $files_after)"
+    if [[ "${files_after}" -ne "${files_before}" ]]; then
+        print_fail "Количество файлов изменилось (было ${files_before}, стало ${files_after})"
+        cleanup_test_env
         return
     fi
 
-    # 6. Проверяем, что архивов не появилось
     local archives
-    archives=$(find "${BACKUP_DIR}" -type f 2>/dev/null | wc -l)
+    archives=$(count_archives "${BACKUP_DIR}")
 
-    if [[ "$archives" -gt 0 ]]; then
+    if [[ "${archives}" -gt 0 ]]; then
         print_fail "Появились архивы, хотя порог не был превышен"
+        cleanup_test_env
         return
     fi
 
-    # 7. Всё хорошо
     print_pass "Ниже порога — ничего не изменилось"
+    cleanup_test_env
 }
-# ---------- Тест 2: превышен порог ----------
+
 test_above_threshold() {
     echo "=== Тест 2: папка заполнена больше X% ==="
-    prepare_env
 
-    # Создаём ≥ 0.5 GB файлов
-    # Запускаем
-    # Проверяем: архив появился, старые файлы удалены, заполненность ≤ X%
+    setup_test_disks 1024 512
+    generate_test_files 800 5 8
 
-    print_pass "Тест 2 (заглушка) — выше порога"
+    local files_before
+    files_before=$(count_files "${LOG_DIR}")
+    echo "Файлов до очистки: ${files_before}"
+
+    if ! BACKUP_DIR="${BACKUP_DIR}" bash "${CLEANUP_SCRIPT}" "${LOG_DIR}" 50; then
+        print_fail "Скрипт завершился с ошибкой"
+        cleanup_test_env
+        return
+    fi
+
+    local files_after
+    files_after=$(count_files "${LOG_DIR}")
+
+    if [[ "${files_after}" -ge "${files_before}" ]]; then
+        print_fail "Файлы не были удалены (было ${files_before}, стало ${files_after})"
+        cleanup_test_env
+        return
+    fi
+
+    local archives
+    archives=$(count_archives "${BACKUP_DIR}")
+
+    if [[ "${archives}" -lt 1 ]]; then
+        print_fail "Архив не создан"
+        cleanup_test_env
+        return
+    fi
+
+    echo "Файлов после очистки: ${files_after}, архивов: ${archives}"
+    print_pass "Выше порога — старые файлы архивированы и удалены"
+    cleanup_test_env
 }
 
-# ---------- Тест 3: порядок по возрасту ----------
 test_oldest_first() {
     echo "=== Тест 3: архивируются самые старые файлы ==="
-    prepare_env
-    print_pass "Тест 3 (заглушка) — порядок"
+
+    # Диск 1 ГБ
+    setup_test_disks 1024 512
+
+    # Создаём 6 файлов вручную с разным возрастом
+    # Старые (должны удалиться):
+    dd if=/dev/zero of="${LOG_DIR}/old_1.dat" bs=1M count=150 status=none
+    touch -d "10 days ago" "${LOG_DIR}/old_1.dat"
+
+    dd if=/dev/zero of="${LOG_DIR}/old_2.dat" bs=1M count=150 status=none
+    touch -d "9 days ago" "${LOG_DIR}/old_2.dat"
+
+    dd if=/dev/zero of="${LOG_DIR}/old_3.dat" bs=1M count=150 status=none
+    touch -d "8 days ago" "${LOG_DIR}/old_3.dat"
+
+    # Новые (должны остаться):
+    dd if=/dev/zero of="${LOG_DIR}/new_1.dat" bs=1M count=150 status=none
+    touch -d "1 day ago" "${LOG_DIR}/new_1.dat"
+
+    dd if=/dev/zero of="${LOG_DIR}/new_2.dat" bs=1M count=150 status=none
+    touch -d "2 hours ago" "${LOG_DIR}/new_2.dat"
+
+    dd if=/dev/zero of="${LOG_DIR}/new_3.dat" bs=1M count=150 status=none
+    # сегодняшний
+
+    echo "Созданные файлы:"
+    ls -l --time-style=long-iso "${LOG_DIR}" 2>/dev/null || ls -l "${LOG_DIR}"
+
+    # Запускаем с порогом 40% (нужно будет удалить часть файлов)
+    if ! BACKUP_DIR="${BACKUP_DIR}" bash "${CLEANUP_SCRIPT}" "${LOG_DIR}" 40; then
+        print_fail "Скрипт завершился с ошибкой"
+        cleanup_test_env
+        return
+    fi
+
+    # Проверяем: старые файлы должны исчезнуть
+    local old_left=0
+    for f in old_1.dat old_2.dat old_3.dat; do
+        if [[ -f "${LOG_DIR}/${f}" ]]; then
+            ((old_left++)) || true
+        fi
+    done
+
+    # Новые файлы должны остаться
+    local new_left=0
+    for f in new_1.dat new_2.dat new_3.dat; do
+        if [[ -f "${LOG_DIR}/${f}" ]]; then
+            ((new_left++)) || true
+        fi
+    done
+
+    local archives
+    archives=$(count_archives "${BACKUP_DIR}")
+
+    echo "Старых файлов осталось: ${old_left}, новых: ${new_left}, архивов: ${archives}"
+
+    if [[ "${old_left}" -gt 0 ]]; then
+        print_fail "Старые файлы не были удалены (осталось ${old_left})"
+        cleanup_test_env
+        return
+    fi
+
+    if [[ "${new_left}" -lt 2 ]]; then
+        print_fail "Слишком много новых файлов удалено (осталось ${new_left})"
+        cleanup_test_env
+        return
+    fi
+
+    if [[ "${archives}" -lt 1 ]]; then
+        print_fail "Архив не создан"
+        cleanup_test_env
+        return
+    fi
+
+    print_pass "Удалены именно самые старые файлы"
+    cleanup_test_env
 }
 
-# ---------- Тест 4: другой X ----------
 test_different_x() {
     echo "=== Тест 4: другое значение X ==="
-    prepare_env
-    print_pass "Тест 4 (заглушка) — другой X"
+
+    setup_test_disks 1024 512
+    generate_test_files 700 3 7
+
+    local files_before
+    files_before=$(count_files "${LOG_DIR}")
+
+    # 1. Высокий порог (95%) — ничего не должно удалиться
+    if ! BACKUP_DIR="${BACKUP_DIR}" bash "${CLEANUP_SCRIPT}" "${LOG_DIR}" 95; then
+        print_fail "Скрипт завершился с ошибкой при высоком пороге"
+        cleanup_test_env
+        return
+    fi
+
+    local files_after_high
+    files_after_high=$(count_files "${LOG_DIR}")
+
+    if [[ "${files_after_high}" -ne "${files_before}" ]]; then
+        print_fail "При высоком пороге файлы изменились"
+        cleanup_test_env
+        return
+    fi
+
+    # 2. Низкий порог (30%) — должно что-то удалиться
+    if ! BACKUP_DIR="${BACKUP_DIR}" bash "${CLEANUP_SCRIPT}" "${LOG_DIR}" 30; then
+        print_fail "Скрипт завершился с ошибкой при низком пороге"
+        cleanup_test_env
+        return
+    fi
+
+    local files_after_low
+    files_after_low=$(count_files "${LOG_DIR}")
+
+    local archives
+    archives=$(count_archives "${BACKUP_DIR}")
+
+    if [[ "${files_after_low}" -ge "${files_before}" ]]; then
+        print_fail "При низком пороге файлы не удалились"
+        cleanup_test_env
+        return
+    fi
+
+    if [[ "${archives}" -lt 1 ]]; then
+        print_fail "Архив не создан при низком пороге"
+        cleanup_test_env
+        return
+    fi
+
+    echo "Было файлов: ${files_before}, после высокого X: ${files_after_high}, после низкого X: ${files_after_low}"
+    print_pass "Разные значения X работают правильно"
+    cleanup_test_env
 }
 
-# ---------- Запуск всех тестов ----------
+# ============================================================
+# Запуск
+# ============================================================
+
 main() {
     echo "Запуск тестов cleanup.sh"
     echo "========================="
@@ -158,7 +364,10 @@ main() {
     test_above_threshold
     test_oldest_first
     test_different_x
-
+    test_bad_path
+    test_bad_x
+    test_archive_fail_keeps_files
+	
     echo "========================="
     echo "Итого: PASS=${PASS}  FAIL=${FAIL}"
 
@@ -170,4 +379,69 @@ main() {
     exit 0
 }
 
+test_bad_path() {
+    echo "=== Тест: неверный путь ==="
+    if bash "$CLEANUP_SCRIPT" "/net/takoy/papki" 50 2>/dev/null; then
+        print_fail "Скрипт не должен был успешно завершиться на несуществующем пути"
+    else
+        print_pass "Неверный путь — ошибка обработана"
+    fi
+}
+
+test_bad_x() {
+    echo "=== Тест: неверный X ==="
+    setup_test_disks 512 256
+    generate_test_files 50 0 3
+
+    if BACKUP_DIR="$BACKUP_DIR" bash "$CLEANUP_SCRIPT" "$LOG_DIR" abc 2>/dev/null; then
+        print_fail "Скрипт не должен был принять нечисловой X"
+        cleanup_test_env
+        return
+    fi
+
+    if BACKUP_DIR="$BACKUP_DIR" bash "$CLEANUP_SCRIPT" "$LOG_DIR" 150 2>/dev/null; then
+        print_fail "Скрипт не должен был принять X > 100"
+        cleanup_test_env
+        return
+    fi
+
+    print_pass "Неверный X — ошибка обработана"
+    cleanup_test_env
+}
+# Тест: если архив создать нельзя — файлы в log не удаляются
+test_archive_fail_keeps_files() {
+    echo "=== Тест: ошибка архивации — оригиналы на месте ==="
+
+    setup_test_disks 1024 512
+    generate_test_files 800 5 8
+
+    local before
+    before=$(count_files "${LOG_DIR}")
+
+    # Ломаем возможность писать в папку архивов
+    sudo chmod a-w "${BACKUP_DIR}"
+
+    # Скрипт должен завершиться с ошибкой
+    if BACKUP_DIR="${BACKUP_DIR}" bash "${CLEANUP_SCRIPT}" "${LOG_DIR}" 50 2>/dev/null; then
+        sudo chmod u+w "${BACKUP_DIR}" 2>/dev/null || true
+        print_fail "Скрипт не должен был успешно завершиться"
+        cleanup_test_env
+        return
+    fi
+
+    # Возвращаем права (чтобы cleanup_test_env мог всё убрать)
+    sudo chmod u+w "${BACKUP_DIR}" 2>/dev/null || true
+
+    local after
+    after=$(count_files "${LOG_DIR}")
+
+    if [[ "${after}" -ne "${before}" ]]; then
+        print_fail "Файлы изменились при ошибке архивации (было ${before}, стало ${after})"
+        cleanup_test_env
+        return
+    fi
+
+    print_pass "При ошибке архивации оригиналы не удалены"
+    cleanup_test_env
+}
 main "$@"
