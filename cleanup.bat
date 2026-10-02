@@ -65,3 +65,34 @@ echo Files to archive: !SELECTED_FILES!
     echo Threshold not exceeded: nothing to do.
     exit /b 0
 )
+
+REM создаем архив из файлов, которые можно удалить (дата + время)
+for /f %%T in ('powershell -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set TIMESTAMP=%%T
+set ARCHIVE_NAME=logs_%TIMESTAMP%.tar.gz
+set BACKUP_DIR=W:\
+
+echo Creating archive: %BACKUP_DIR%%ARCHIVE_NAME%
+tar -czf "%BACKUP_DIR%%ARCHIVE_NAME%" -C %FOLDER% !SELECTED_FILES:;= !
+REM проверяем на ошибки
+if not exist "%BACKUP_DIR%%ARCHIVE_NAME%" (
+    echo Error: archive was not created. Original files kept.
+    exit /b 1
+)
+
+tar -tzf "%BACKUP_DIR%%ARCHIVE_NAME%" >nul
+if errorlevel 1 (
+    echo Error: archive is corrupted. Original files kept.
+    exit /b 1
+)
+
+REM удаляем оригиналы после успешной проверки 
+echo Archive verified: %BACKUP_DIR%%ARCHIVE_NAME%
+
+powershell -Command "$files = '!SELECTED_FILES!'.TrimEnd(';').Split(';'); foreach ($file in $files) { Remove-Item -LiteralPath (Join-Path '%FOLDER%' $file) -Force }"
+
+if errorlevel 1 (
+    echo Error: failed to delete original files. Archive kept: %BACKUP_DIR%%ARCHIVE_NAME%
+    exit /b 1
+)
+
+echo Cleanup complete.
