@@ -1,72 +1,147 @@
 #!/usr/bin/env bash
+set -o pipefail
+export LC_ALL=C
+
+error() {
+    printf 'Ошибка: %s\n' "$*" >&2
+}
 
 if [[ $# -ne 2 ]]; then
-    echo "Использование: bash cleanup.sh <папка_логов> <порог_в_процентах>" >&2
+    error "Использование: bash cleanup.sh <папка_логов> <порог_в_процентах>"
     exit 1
 fi
 log_dir=$1
 threshold_input=$2
 backup_dir=${BACKUP_DIR:-/backup}
+
 if [[ ! -d "$log_dir" ]]; then
-    echo "Ошибка: папка не существует: $log_dir" >&2
+    error "папка не существует: $log_dir"
     exit 1
 fi
-if [[ ! $threshold_input =~ ^[0-9]{1,3}$ ]]; then
-    echo "Ошибка: порог X должен быть целым числом от 0 до 100." >&2
+if [[ ! $threshold_input =~ ^[0-9]+$ ]]; then
+    error "порог X должен быть целым числом от 0 до 100"
+    exit 1
+fi
+while [[ ${#threshold_input} -gt 1 && $threshold_input == 0* ]]; do
+    threshold_input=${threshold_input#0}
+done
+if (( ${#threshold_input} > 3 )); then
+    error "порог X должен быть целым числом от 0 до 100"
     exit 1
 fi
 threshold=$((10#$threshold_input))
 if (( threshold > 100 )); then
-    echo "Ошибка: порог X должен быть целым числом от 0 до 100." >&2
+    error "порог X должен быть целым числом от 0 до 100"
     exit 1
 fi
-if [[ ! -d "$backup_dir" || ! -w "$backup_dir" ]]; then
-    echo "Ошибка: папка архива недоступна для записи: $backup_dir" >&2
+if [[ ! -d "$backup_dir" || ! -w "$backup_dir" || ! -x "$backup_dir" ]]; then
+    error "папка архива недоступна для записи: $backup_dir"
     exit 1
 fi
-
 log_dir=$(cd "$log_dir" && pwd -P) || exit 1
 backup_dir=$(cd "$backup_dir" && pwd -P) || exit 1
-log_device=$(df -P "$log_dir" | awk 'NR==2 {print $1}')
-parent_device=$(df -P "$(dirname "$log_dir")" | awk 'NR==2 {print $1}')
-backup_device=$(df -P "$backup_dir" | awk 'NR==2 {print $1}')
+if [[ ! -r "$log_dir" || ! -w "$log_dir" || ! -x "$log_dir" ]]; then
+    error "недостаточно прав для чтения и очистки: $log_dir"
+    exit 1
+fi
+for tool in df awk stat du tar gzip cmp mktemp mv rm mkdir rmdir uname date; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        error "не найдена программа: $tool"
+        exit 1
+    fi
+done
+
+disk_device() {
+    local output
+    output=$(df -Pk "$1") || return 1
+    printf '%s\n' "$output" | awk 'NR==2 {print $1}'
+}
+log_device=$(disk_device "$log_dir") || exit 1
+parent_device=$(disk_device "$(dirname "$log_dir")") || exit 1
+backup_device=$(disk_device "$backup_dir") || exit 1
 if [[ -z $log_device || $log_device == "$parent_device" ]]; then
-    echo "Ошибка: папка логов должна быть точкой монтирования отдельного диска." >&2
+    error "папка логов должна быть точкой монтирования отдельного диска"
     exit 1
 fi
 if [[ -z $backup_device || $log_device == "$backup_device" ]]; then
-    echo "Ошибка: архив должен храниться на другом диске." >&2
+    error "архив должен храниться на другой файловой системе"
     exit 1
 fi
 
 read_disk() {
-    local line
-    line=$(df -Pk "$log_dir" | awk 'NR==2 {print $2, $3, $5}') || return 1
-    read -r total_kb used_kb usage <<< "$line"
+    local output values
+    output=$(df -Pk "$log_dir") || return 1
+    values=$(printf '%s\n' "$output" | awk 'NR==2 {print $2, $3, $4, $5}')
+    read -r total_kb used_kb available_kb usage <<< "$values"
     usage=${usage%%%}
-    [[ $total_kb =~ ^[0-9]+$ && $used_kb =~ ^[0-9]+$ && $usage =~ ^[0-9]+$ ]]
+    [[ $total_kb =~ ^[0-9]+$ && $used_kb =~ ^[0-9]+$ &&
+       $available_kb =~ ^[0-9]+$ && $usage =~ ^[0-9]+$ ]] || return 1
+    (( total_kb > 0 && used_kb + available_kb > 0 ))
 }
-if ! read_disk; then
-    echo "Ошибка: не удалось определить заполненность диска." >&2
+
+#LZMA
+configure_archive() {
+    archive_ext=tar.gz
+    case "${LAB1_MAX_COMPRESSION:-0}" in
+        0) return 0 ;;
+        1) error "режим LZMA пока не добавлен; оригиналы сохранены"; return 1 ;;
+        *) error "LAB1_MAX_COMPRESSION должен быть 0 или 1"; return 1 ;;
+    esac
+}
+create_archive() {
+    local destination=$1
+    shift
+    tar -czf "$destination" -C "$log_dir" -- "$@"
+}
+check_archive() {
+    gzip -t "$1" && tar -tzf "$1" >/dev/null
+}
+extract_archived_file() {
+    tar -xOf "$1" "$2"
+}
+# КОНЕЦ LZMA
+
+if ! configure_archive || ! read_disk; then
+    error "не удалось подготовить режим архива или прочитать заполненность"
     exit 1
 fi
-echo "Заполненность диска с логами: $usage%; порог: $threshold%."
+printf 'Заполненность диска с логами: %s%%; порог: %s%%.\n' "$usage" "$threshold"
 if (( usage <= threshold )); then
-    echo "Порог не превышен: ничего делать не нужно."
+    printf 'Порог не превышен: ничего делать не нужно.\n'
     exit 0
 fi
+lock_dir="$backup_dir/.cleanup.lock"
+if ! mkdir "$lock_dir"; then
+    error "папка архива занята другим запуском; проверьте $lock_dir"
+    exit 1
+fi
+temp_archive=
+release_resources() {
+    [[ -z $temp_archive ]] || rm -f -- "$temp_archive"
+    rmdir "$lock_dir" 2>/dev/null || true
+}
+trap release_resources EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
+case "$(uname -s)" in
+    Darwin|FreeBSD) stat_style=bsd ;;
+    *) stat_style=gnu ;;
+esac
+file_time() {
+    if [[ $stat_style == bsd ]]; then
+        stat -f %m "$1"
+    else
+        stat -c %Y "$1"
+    fi
+}
+shopt -s nullglob dotglob
 files=()
 times=()
-while IFS= read -r -d '' file; do
-    if time=$(stat -f %m "$file" 2>/dev/null); then
-        : # macOS
-    elif time=$(stat -c %Y "$file" 2>/dev/null); then
-        : # Linux
-    else
-        echo "Ошибка: не удалось прочитать дату файла: $file" >&2
-        exit 1
-    fi
+for file in "$log_dir"/*; do
+    [[ -f "$file" && ! -L "$file" ]] || continue
+    time=$(file_time "$file") || { error "не прочитана дата: $file"; exit 1; }
+    [[ $time =~ ^-?[0-9]+$ ]] || { error "неверная дата: $file"; exit 1; }
     i=${#files[@]}
     while (( i > 0 && time < times[i-1] )); do
         files[i]=${files[i-1]}
@@ -75,66 +150,77 @@ while IFS= read -r -d '' file; do
     done
     files[i]=$file
     times[i]=$time
-done < <(find "$log_dir" -maxdepth 1 -type f -print0)
+done
 if (( ${#files[@]} == 0 )); then
-    echo "Ошибка: подходящих файлов нет. Ничего не удалено." >&2
+    error "подходящих файлов нет; порог превышен"
     exit 1
 fi
 
-target_kb=$((total_kb * threshold / 100))
-needed_kb=$((used_kb - target_kb))
-selected=()
-freed_kb=0
-for file in "${files[@]}"; do
-    selected+=("$file")
-    size_kb=$(du -sk "$file" | awk '{print $1}')
-    if [[ ! $size_kb =~ ^[0-9]+$ ]]; then
-        echo "Ошибка: не удалось определить размер файла: $file" >&2
+cursor=0
+archived_count=0
+round=0
+while (( usage > threshold )); do
+    target_kb=$(((used_kb + available_kb) * threshold / 100))
+    needed_kb=$((used_kb - target_kb))
+    selected=()
+    relative=()
+    estimated_kb=0
+    while (( cursor < ${#files[@]} )); do
+        file=${files[cursor]}
+        ((cursor++))
+        if [[ ! -f "$file" || -L "$file" ]]; then
+            error "набор файлов изменился во время очистки: $file"
+            exit 1
+        fi
+        size_output=$(du -k "$file") || { error "не прочитан размер: $file"; exit 1; }
+        size_kb=${size_output%%[[:space:]]*}
+        [[ $size_kb =~ ^[0-9]+$ ]] || { error "неверный размер: $file"; exit 1; }
+        selected+=("$file")
+        relative+=("./${file##*/}")
+        estimated_kb=$((estimated_kb + size_kb))
+        (( estimated_kb >= needed_kb )) && break
+    done
+    if (( ${#selected[@]} == 0 )); then
+        error "файлы закончились, но заполненность $usage% всё ещё выше $threshold%"
         exit 1
     fi
-    freed_kb=$((freed_kb + size_kb))
-    (( freed_kb >= needed_kb )) && break
-done
-if (( freed_kb < needed_kb )); then
-    echo "Ошибка: файлов недостаточно для достижения порога. Ничего не удалено." >&2
-    exit 1
-fi
-
-relative=()
-for file in "${selected[@]}"; do
-    relative+=("./${file##*/}")
-done
-temp_archive=$(mktemp "$backup_dir/.cleanup.XXXXXXXX") || exit 1
-if ! tar -czf "$temp_archive" -C "$log_dir" -- "${relative[@]}"; then
-    rm -f "$temp_archive"
-    echo "Ошибка: архив не создан. Оригиналы сохранены." >&2
-    exit 1
-fi
-if ! gzip -t "$temp_archive" || ! tar -tzf "$temp_archive" >/dev/null; then
-    rm -f "$temp_archive"
-    echo "Ошибка: архив повреждён. Оригиналы сохранены." >&2
-    exit 1
-fi
-for i in "${!selected[@]}"; do
-    if ! tar -xOf "$temp_archive" "${relative[i]}" | cmp - "${selected[i]}"; then
-        rm -f "$temp_archive"
-        echo "Ошибка: архив не совпадает с оригиналом. Оригиналы сохранены." >&2
+    temp_archive=$(mktemp "$backup_dir/.cleanup.XXXXXXXX") || exit 1
+    if ! create_archive "$temp_archive" "${relative[@]}" || ! check_archive "$temp_archive"; then
+        error "архив не создан или не прошёл проверку; выбранные оригиналы сохранены"
         exit 1
     fi
-done
-archive="$backup_dir/logs_$(date +%Y%m%d_%H%M%S)_$$.tar.gz"
-if ! mv "$temp_archive" "$archive"; then
-    rm -f "$temp_archive"
-    echo "Ошибка: архив не сохранён. Оригиналы сохранены." >&2
-    exit 1
-fi
-echo "Проверенный архив: $archive; файлов: ${#selected[@]}."
-for file in "${selected[@]}"; do
-    if ! rm -- "$file"; then
-        echo "Ошибка: файл не удалён: $file. Архив сохранён: $archive" >&2
+    for i in "${!selected[@]}"; do
+        if [[ ! -f ${selected[i]} || -L ${selected[i]} ]] ||
+           ! extract_archived_file "$temp_archive" "${relative[i]}" | cmp - "${selected[i]}"; then
+            error "архив не совпадает с оригиналом; выбранные файлы сохранены"
+            exit 1
+        fi
+    done
+    ((round++))
+    archive="$backup_dir/logs_$(date +%Y%m%d_%H%M%S)_${temp_archive##*.}_${round}.${archive_ext}"
+    if ! mv -- "$temp_archive" "$archive"; then
+        error "архив не сохранён; выбранные оригиналы сохранены"
         exit 1
     fi
+    temp_archive=
+    printf 'Проверенный архив: %s; файлов: %s.\n' "$archive" "${#selected[@]}"
+    for i in "${!selected[@]}"; do
+        if [[ ! -f ${selected[i]} || -L ${selected[i]} ]] ||
+           ! extract_archived_file "$archive" "${relative[i]}" | cmp - "${selected[i]}"; then
+            error "файл изменился перед удалением: ${selected[i]}; архив сохранён"
+            exit 1
+        fi
+        if ! rm -- "${selected[i]}"; then
+            error "файл не удалён: ${selected[i]}; архив сохранён: $archive"
+            exit 1
+        fi
+        ((archived_count++))
+    done
+    if ! read_disk; then
+        error "не удалось проверить заполненность после очистки; архив сохранён"
+        exit 1
+    fi
+    printf 'После очистки заполненность: %s%%.\n' "$usage"
 done
-if read_disk; then
-    echo "После очистки заполненность: $usage%."
-fi
+printf 'Готово: заполненность %s%% <= %s%%; архивировано файлов: %s.\n' "$usage" "$threshold" "$archived_count"
+exit 0
