@@ -78,28 +78,35 @@ read_disk() {
        $available_kb =~ ^[0-9]+$ && $usage =~ ^[0-9]+$ ]] || return 1
     (( total_kb > 0 && used_kb + available_kb > 0 ))
 }
-
-#LZMA
+#выбор между gzip и lzma
 configure_archive() {
-    archive_ext=tar.gz
     case "${LAB1_MAX_COMPRESSION:-0}" in
-        0) return 0 ;;
-        1) error "режим LZMA пока не добавлен; оригиналы сохранены"; return 1 ;;
+        0) archive_ext=tar.gz; return 0 ;;
+        1) archive_ext=tar.xz; return 0 ;;
         *) error "LAB1_MAX_COMPRESSION должен быть 0 или 1"; return 1 ;;
     esac
 }
+#добавила проверку если мы в режиме lzma
 create_archive() {
     local destination=$1
     shift
-    tar -czf "$destination" -C "$log_dir" -- "$@"
+    if [[ $archive_ext == tar.xz ]]; then
+        tar -cJf "$destination" -C "$log_dir" -- "$@"
+    else
+        tar -czf "$destination" -C "$log_dir" -- "$@"
+    fi
 }
+#проверка на целостность
 check_archive() {
-    gzip -t "$1" && tar -tzf "$1" >/dev/null
+    if [[ $archive_ext == tar.xz ]]; then
+        xz -t "$1" && tar -tJf "$1" >/dev/null
+    else
+        gzip -t "$1" && tar -tzf "$1" >/dev/null
+    fi
 }
 extract_archived_file() {
     tar -xOf "$1" "$2"
 }
-# КОНЕЦ LZMA
 
 if ! configure_archive || ! read_disk; then
     error "не удалось подготовить режим архива или прочитать заполненность"
