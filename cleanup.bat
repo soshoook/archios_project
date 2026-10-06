@@ -39,9 +39,11 @@ if "%LAB1_MAX_COMPRESSION%"=="1" (
     exit /b 1
 )
 
-REM выдает насколько занят/свободен вирт диск и превосходит ли это порог
 set DRIVE_LETTER=%FOLDER:~0,1%
+set BACKUP_DIR=W:\
 
+:cleanup_loop
+REM выдает насколько занят/свободен вирт диск и превосходит ли это порог
 for /f %%A in ('powershell -Command "(Get-PSDrive %DRIVE_LETTER%).Free"') do set FREE=%%A
 for /f %%A in ('powershell -Command "(Get-PSDrive %DRIVE_LETTER%).Used"') do set USED=%%A
 
@@ -56,15 +58,24 @@ set /a NEEDED_KB=USED_KB-TARGET_KB
 echo Folder: %FOLDER%
 echo Usage: %USAGE%%%; threshold: %THRESHOLD%%%
 
-REM считаем сколько надо освободить и выдаем какие файлы можно удалить
-if %USAGE% GTR %THRESHOLD% (
-    echo Threshold exceeded: cleanup needed.
-    
-    set FREED_KB=0
-    set SELECTED_FILES=
+REM пока заполненность выше порога — продолжаем очистку
+if %USAGE% LEQ %THRESHOLD% (
+    echo Threshold not exceeded: cleanup complete.
+    exit /b 0
+)
+
+echo Threshold exceeded: cleanup needed.
+
+set FREED_KB=0
+set SELECTED_FILES=
 
 for /f "tokens=1,2 delims=;" %%A in ('powershell -Command "Get-ChildItem '%FOLDER%' -File | Sort-Object LastWriteTime | ForEach-Object { $_.Name + ';' + $_.Length }"') do (
     if !FREED_KB! LSS !NEEDED_KB! (
+        REM проверка, что файл всё ещё существует и это обычный файл (не symlink)
+        if not exist "%FOLDER%\%%A" (
+            echo Error: набор файлов изменился во время очистки: %%A
+            exit /b 1
+        )
         set /a SIZE_KB=%%B/1024
         set /a FREED_KB+=SIZE_KB
         set SELECTED_FILES=!SELECTED_FILES!%%A;
@@ -77,16 +88,16 @@ if !FREED_KB! LSS !NEEDED_KB! (
     exit /b 1
 )
 
-echo Files to archive: !SELECTED_FILES!
-) else (
-    echo Threshold not exceeded: nothing to do.
-    exit /b 0
+if "!SELECTED_FILES!"=="" (
+    echo Error: no files selected. Nothing deleted.
+    exit /b 1
 )
+
+echo Files to archive: !SELECTED_FILES!
 
 REM создаем архив из файлов, которые можно удалить (дата + время)
 for /f %%T in ('powershell -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set TIMESTAMP=%%T
 set ARCHIVE_NAME=logs_%TIMESTAMP%.%ARCHIVE_EXT%
-set BACKUP_DIR=W:\
 
 echo Creating archive: %BACKUP_DIR%%ARCHIVE_NAME%
 if "%ARCHIVE_EXT%"=="tar.xz" (
@@ -113,7 +124,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM удаляем оригиналы после успешной проверки 
+REM удаляем оригиналы после успешной проверки
 echo Archive verified: %BACKUP_DIR%%ARCHIVE_NAME%
 
 powershell -Command "$files = '!SELECTED_FILES!'.TrimEnd(';').Split(';'); foreach ($file in $files) { Remove-Item -LiteralPath (Join-Path '%FOLDER%' $file) -Force }"
@@ -123,4 +134,18 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo Cleanup complete.
+REM проверка, что все выбранные файлы действительно удалились
+set DELETE_FAILED=0
+for %%F in (!SELECTED_FILES:;= !) do (
+    if exist "%FOLDER%\%%F" (
+        echo Error: file was not deleted: %%F
+        set DELETE_FAILED=1
+    )
+)
+if !DELETE_FAILED! EQU 1 (
+    echo Error: some original files were not deleted. Archive kept: %BACKUP_DIR%%ARCHIVE_NAME%
+    exit /b 1
+)
+
+echo Files successfully deleted. Re-checking usage...
+goto cleanup_loop
