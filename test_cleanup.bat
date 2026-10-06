@@ -14,6 +14,7 @@ set BACKUP_DRIVE=W
 call :test_below_threshold
 call :test_above_threshold
 call :test_oldest_first
+call :test_different_x
 
 echo ================================
 echo PASS: %PASS_COUNT%  FAIL: %FAIL_COUNT%
@@ -213,5 +214,56 @@ if %ARCHIVE_COUNT% LSS 1 (
 )
 
 echo PASS: oldest files archived first
+set /a PASS_COUNT+=1
+goto :eof
+
+
+REM четвертый тест - другое значение порога
+:test_different_x
+echo === Test 4: different threshold values ===
+call :prepare_env
+call :generate_files 350 7 3
+
+for /f %%A in ('dir /b %LOG_DRIVE%:\ ^| find /c /v ""') do set FILES_BEFORE=%%A
+
+call cleanup.bat %LOG_DRIVE%:\ 95
+if errorlevel 1 (
+    echo FAIL: script returned error at high threshold
+    set /a FAIL_COUNT+=1
+    goto :eof
+)
+
+for /f %%A in ('dir /b %LOG_DRIVE%:\ ^| find /c /v ""') do set FILES_AFTER_HIGH=%%A
+
+if not "%FILES_BEFORE%"=="%FILES_AFTER_HIGH%" (
+    echo FAIL: files changed at high threshold
+    set /a FAIL_COUNT+=1
+    goto :eof
+)
+
+call cleanup.bat %LOG_DRIVE%:\ 30
+if errorlevel 1 (
+    echo FAIL: script returned error at low threshold
+    set /a FAIL_COUNT+=1
+    goto :eof
+)
+
+for /f %%A in ('dir /b %LOG_DRIVE%:\ ^| find /c /v ""') do set FILES_AFTER_LOW=%%A
+
+if %FILES_AFTER_LOW% GEQ %FILES_BEFORE% (
+    echo FAIL: files not deleted at low threshold
+    set /a FAIL_COUNT+=1
+    goto :eof
+)
+
+call :count_archives
+if %ARCHIVE_COUNT% LSS 1 (
+    echo FAIL: archive not created at low threshold
+    set /a FAIL_COUNT+=1
+    goto :eof
+)
+
+echo Before: %FILES_BEFORE%, after high X: %FILES_AFTER_HIGH%, after low X: %FILES_AFTER_LOW%
+echo PASS: different threshold values work correctly
 set /a PASS_COUNT+=1
 goto :eof
