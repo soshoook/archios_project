@@ -16,9 +16,26 @@ if not exist "%FOLDER%\" (
     exit /b 1
 )
 
-REM если порог Х не указан
-if "%THRESHOLD%"=="" (
-    echo Error: threshold X isn't specified.
+REM если порог Х не указан/не подходит по условиям
+echo %THRESHOLD%| findstr /r "^[0-9][0-9]*$" >nul
+if errorlevel 1 (
+    echo Error: threshold must be a whole number from 0 to 100.
+    exit /b 1
+)
+if %THRESHOLD% GTR 100 (
+    echo Error: threshold must be a whole number from 0 to 100.
+    exit /b 1
+)
+
+REM определяем режим сжатия gzip или LZMA
+if "%LAB1_MAX_COMPRESSION%"=="1" (
+    set ARCHIVE_EXT=tar.xz
+) else if "%LAB1_MAX_COMPRESSION%"=="" (
+    set ARCHIVE_EXT=tar.gz
+) else if "%LAB1_MAX_COMPRESSION%"=="0" (
+    set ARCHIVE_EXT=tar.gz
+) else (
+    echo Error: LAB1_MAX_COMPRESSION must be 0 or 1.
     exit /b 1
 )
 
@@ -68,18 +85,29 @@ echo Files to archive: !SELECTED_FILES!
 
 REM создаем архив из файлов, которые можно удалить (дата + время)
 for /f %%T in ('powershell -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set TIMESTAMP=%%T
-set ARCHIVE_NAME=logs_%TIMESTAMP%.tar.gz
+set ARCHIVE_NAME=logs_%TIMESTAMP%.%ARCHIVE_EXT%
 set BACKUP_DIR=W:\
 
 echo Creating archive: %BACKUP_DIR%%ARCHIVE_NAME%
-tar -czf "%BACKUP_DIR%%ARCHIVE_NAME%" -C %FOLDER% !SELECTED_FILES:;= !
+if "%ARCHIVE_EXT%"=="tar.xz" (
+    tar -cf "%BACKUP_DIR%logs_%TIMESTAMP%.tar" -C %FOLDER% !SELECTED_FILES:;= !
+    "C:\Program Files\7-Zip\7z.exe" a -txz "%BACKUP_DIR%%ARCHIVE_NAME%" "%BACKUP_DIR%logs_%TIMESTAMP%.tar" >nul
+    del "%BACKUP_DIR%logs_%TIMESTAMP%.tar"
+) else (
+    tar -czf "%BACKUP_DIR%%ARCHIVE_NAME%" -C %FOLDER% !SELECTED_FILES:;= !
+)
+
 REM проверяем на ошибки
 if not exist "%BACKUP_DIR%%ARCHIVE_NAME%" (
     echo Error: archive was not created. Original files kept.
     exit /b 1
 )
 
-tar -tzf "%BACKUP_DIR%%ARCHIVE_NAME%" >nul
+if "%ARCHIVE_EXT%"=="tar.xz" (
+    "C:\Program Files\7-Zip\7z.exe" t "%BACKUP_DIR%%ARCHIVE_NAME%" >nul
+) else (
+    tar -tzf "%BACKUP_DIR%%ARCHIVE_NAME%" >nul
+)
 if errorlevel 1 (
     echo Error: archive is corrupted. Original files kept.
     exit /b 1
