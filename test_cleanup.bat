@@ -13,6 +13,7 @@ set BACKUP_DRIVE=W
 
 call :test_below_threshold
 call :test_above_threshold
+call :test_oldest_first
 
 echo ================================
 echo PASS: %PASS_COUNT%  FAIL: %FAIL_COUNT%
@@ -76,7 +77,7 @@ for /l %%i in (1,1,%GEN_COUNT%) do (
 goto :eof
 
 
-REM первый тест
+REM первый тест - использование меньше порога
 :test_below_threshold
 echo === Test 1: usage below threshold ===
 call :prepare_env
@@ -113,7 +114,7 @@ for /f %%A in ('dir /b "%BACKUP_DRIVE%:\" 2^>nul ^| find /c /v ""') do set ARCHI
 goto :eof
 
 
-REM второй тест
+REM второй тест - использование больше порога
 :test_above_threshold
 echo === Test 2: usage above threshold ===
 call :prepare_env
@@ -146,5 +147,71 @@ if %ARCHIVE_COUNT% LSS 1 (
 
 echo Files after: %FILES_AFTER%, archives: %ARCHIVE_COUNT%
 echo PASS: above threshold - old files archived and deleted
+set /a PASS_COUNT+=1
+goto :eof
+
+REM третий тест - порядок по возрасту
+:test_oldest_first
+echo === Test 3: oldest files archived first ===
+call :prepare_env
+
+REM создаем 6 файлов с разными датами и проверяем
+powershell -Command "fsutil file createnew %LOG_DRIVE%:\old_1.dat 73400320" >nul
+powershell -Command "(Get-Item '%LOG_DRIVE%:\old_1.dat').LastWriteTime = (Get-Date).AddDays(-10)"
+
+powershell -Command "fsutil file createnew %LOG_DRIVE%:\old_2.dat 73400320" >nul
+powershell -Command "(Get-Item '%LOG_DRIVE%:\old_2.dat').LastWriteTime = (Get-Date).AddDays(-9)"
+
+powershell -Command "fsutil file createnew %LOG_DRIVE%:\old_3.dat 73400320" >nul
+powershell -Command "(Get-Item '%LOG_DRIVE%:\old_3.dat').LastWriteTime = (Get-Date).AddDays(-8)"
+
+powershell -Command "fsutil file createnew %LOG_DRIVE%:\new_1.dat 73400320" >nul
+powershell -Command "(Get-Item '%LOG_DRIVE%:\new_1.dat').LastWriteTime = (Get-Date).AddDays(-1)"
+
+powershell -Command "fsutil file createnew %LOG_DRIVE%:\new_2.dat 73400320" >nul
+powershell -Command "(Get-Item '%LOG_DRIVE%:\new_2.dat').LastWriteTime = (Get-Date).AddHours(-2)"
+
+powershell -Command "fsutil file createnew %LOG_DRIVE%:\new_3.dat 73400320" >nul
+
+call cleanup.bat %LOG_DRIVE%:\ 40
+if errorlevel 1 (
+    echo FAIL: script returned error
+    set /a FAIL_COUNT+=1
+    goto :eof
+)
+
+set OLD_LEFT=0
+if exist %LOG_DRIVE%:\old_1.dat set /a OLD_LEFT+=1
+if exist %LOG_DRIVE%:\old_2.dat set /a OLD_LEFT+=1
+if exist %LOG_DRIVE%:\old_3.dat set /a OLD_LEFT+=1
+
+set NEW_LEFT=0
+if exist %LOG_DRIVE%:\new_1.dat set /a NEW_LEFT+=1
+if exist %LOG_DRIVE%:\new_2.dat set /a NEW_LEFT+=1
+if exist %LOG_DRIVE%:\new_3.dat set /a NEW_LEFT+=1
+
+call :count_archives
+
+echo Old files left: %OLD_LEFT%, new files left: %NEW_LEFT%, archives: %ARCHIVE_COUNT%
+
+if %OLD_LEFT% GTR 0 (
+    echo FAIL: old files were not deleted
+    set /a FAIL_COUNT+=1
+    goto :eof
+)
+
+if %NEW_LEFT% LSS 2 (
+    echo FAIL: too many new files were deleted
+    set /a FAIL_COUNT+=1
+    goto :eof
+)
+
+if %ARCHIVE_COUNT% LSS 1 (
+    echo FAIL: archive not created
+    set /a FAIL_COUNT+=1
+    goto :eof
+)
+
+echo PASS: oldest files archived first
 set /a PASS_COUNT+=1
 goto :eof
