@@ -25,12 +25,35 @@ REM подготовка окружения
 :prepare_env
 echo Preparing test environment...
 
-REM проверка на наличие уже сущ VHD файлов (+ их удаление) и создание новых
-powershell -Command "if (Test-Path '%LOG_VHD%') { Dismount-VHD -Path '%LOG_VHD%' -ErrorAction SilentlyContinue; Remove-Item '%LOG_VHD%' }"
-powershell -Command "if (Test-Path '%BACKUP_VHD%') { Dismount-VHD -Path '%BACKUP_VHD%' -ErrorAction SilentlyContinue; Remove-Item '%BACKUP_VHD%' }"
+if not exist C:\vhd mkdir C:\vhd
 
-powershell -Command "New-VHD -Path '%LOG_VHD%' -SizeBytes 600MB -Fixed | Mount-VHD -Passthru | Initialize-Disk -PartitionStyle MBR -PassThru | New-Partition -DriveLetter %LOG_DRIVE% -UseMaximumSize | Format-Volume -FileSystem NTFS -Confirm:$false"
-powershell -Command "New-VHD -Path '%BACKUP_VHD%' -SizeBytes 600MB -Fixed | Mount-VHD -Passthru | Initialize-Disk -PartitionStyle MBR -PassThru | New-Partition -DriveLetter %BACKUP_DRIVE% -UseMaximumSize | Format-Volume -FileSystem NTFS -Confirm:$false"
+REM автоматизируем ввод команд
+if exist "%LOG_VHD%" (
+    > "%TEMP%\detach_log.txt" echo select vdisk file=%LOG_VHD%
+    >> "%TEMP%\detach_log.txt" echo detach vdisk
+    diskpart /s "%TEMP%\detach_log.txt" >nul 2>nul
+    del "%LOG_VHD%" >nul 2>nul
+)
+if exist "%BACKUP_VHD%" (
+    > "%TEMP%\detach_backup.txt" echo select vdisk file=%BACKUP_VHD%
+    >> "%TEMP%\detach_backup.txt" echo detach vdisk
+    diskpart /s "%TEMP%\detach_backup.txt" >nul 2>nul
+    del "%BACKUP_VHD%" >nul 2>nul
+)
+
+> "%TEMP%\create_log.txt" echo create vdisk file=%LOG_VHD% maximum=600 type=fixed
+>> "%TEMP%\create_log.txt" echo attach vdisk
+>> "%TEMP%\create_log.txt" echo create partition primary
+>> "%TEMP%\create_log.txt" echo format quick label=logdisk
+>> "%TEMP%\create_log.txt" echo assign letter=%LOG_DRIVE%
+diskpart /s "%TEMP%\create_log.txt" >nul
+
+> "%TEMP%\create_backup.txt" echo create vdisk file=%BACKUP_VHD% maximum=600 type=fixed
+>> "%TEMP%\create_backup.txt" echo attach vdisk
+>> "%TEMP%\create_backup.txt" echo create partition primary
+>> "%TEMP%\create_backup.txt" echo format quick label=backupdisk
+>> "%TEMP%\create_backup.txt" echo assign letter=%BACKUP_DRIVE%
+diskpart /s "%TEMP%\create_backup.txt" >nul
 
 goto :eof
 
