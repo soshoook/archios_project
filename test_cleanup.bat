@@ -12,6 +12,7 @@ set LOG_DRIVE=V
 set BACKUP_DRIVE=W
 
 call :test_below_threshold
+call :test_above_threshold
 
 echo ================================
 echo PASS: %PASS_COUNT%  FAIL: %FAIL_COUNT%
@@ -58,22 +59,24 @@ diskpart /s "%TEMP%\create_backup.txt" >nul
 goto :eof
 
 
-REM создание тестовых файлов
+REM создание тестовых файлов (с возможностью самому задать время их создания)
 :generate_files
 set GEN_SIZE_MB=%1
 set GEN_COUNT=%2
-
-REM сколько мб должно быть в каждом файле для получения нужного количества
+set GEN_AGE_DAYS=%3
 set /a GEN_SIZE_PER_FILE=GEN_SIZE_MB/GEN_COUNT
 
 for /l %%i in (1,1,%GEN_COUNT%) do (
     set /a BYTES=GEN_SIZE_PER_FILE*1048576
     powershell -Command "fsutil file createnew %LOG_DRIVE%:\file_%%i.dat !BYTES!" >nul
+    if not "%GEN_AGE_DAYS%"=="" if not "%GEN_AGE_DAYS%"=="0" (
+        powershell -Command "(Get-Item '%LOG_DRIVE%:\file_%%i.dat').LastWriteTime = (Get-Date).AddDays(-%GEN_AGE_DAYS%)"
+    )
 )
 goto :eof
 
 
-REM сам первый тест
+REM первый тест
 :test_below_threshold
 echo === Test 1: usage below threshold ===
 call :prepare_env
@@ -99,5 +102,49 @@ if not "%FILES_BEFORE%"=="%FILES_AFTER%" (
 )
 
 echo PASS: below threshold - nothing changed
+set /a PASS_COUNT+=1
+goto :eof
+
+
+REM програма подсчет архивов
+:count_archives
+set ARCHIVE_COUNT=0
+for /f %%A in ('dir /b "%BACKUP_DRIVE%:\" 2^>nul ^| find /c /v ""') do set ARCHIVE_COUNT=%%A
+goto :eof
+
+
+REM второй тест
+:test_above_threshold
+echo === Test 2: usage above threshold ===
+call :prepare_env
+call :generate_files 400 4 5
+
+for /f %%A in ('dir /b %LOG_DRIVE%:\ ^| find /c /v ""') do set FILES_BEFORE=%%A
+echo Files before: %FILES_BEFORE%
+
+call cleanup.bat %LOG_DRIVE%:\ 50
+if errorlevel 1 (
+    echo FAIL: script returned error
+    set /a FAIL_COUNT+=1
+    goto :eof
+)
+
+for /f %%A in ('dir /b %LOG_DRIVE%:\ ^| find /c /v ""') do set FILES_AFTER=%%A
+
+if %FILES_AFTER% GEQ %FILES_BEFORE% (
+    echo FAIL: files were not deleted was=%FILES_BEFORE% now=%FILES_AFTER%
+    set /a FAIL_COUNT+=1
+    goto :eof
+)
+
+call :count_archives
+if %ARCHIVE_COUNT% LSS 1 (
+    echo FAIL: archive not created
+    set /a FAIL_COUNT+=1
+    goto :eof
+)
+
+echo Files after: %FILES_AFTER%, archives: %ARCHIVE_COUNT%
+echo PASS: above threshold - old files archived and deleted
 set /a PASS_COUNT+=1
 goto :eof
