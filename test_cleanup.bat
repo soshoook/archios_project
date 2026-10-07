@@ -15,6 +15,9 @@ call :test_below_threshold
 call :test_above_threshold
 call :test_oldest_first
 call :test_different_x
+call :test_bad_path
+call :test_bad_x
+call :test_archive_fail_keeps_files
 
 echo ================================
 echo PASS: %PASS_COUNT%  FAIL: %FAIL_COUNT%
@@ -265,5 +268,77 @@ if %ARCHIVE_COUNT% LSS 1 (
 
 echo Before: %FILES_BEFORE%, after high X: %FILES_AFTER_HIGH%, after low X: %FILES_AFTER_LOW%
 echo PASS: different threshold values work correctly
+set /a PASS_COUNT+=1
+goto :eof
+
+
+REM пятый тест - несуществующая папка
+:test_bad_path
+echo === Test 5: invalid path ===
+
+call cleanup.bat C:\YaPridumalaPapku 50
+if errorlevel 1 (
+    echo PASS: invalid path - error handled
+    set /a PASS_COUNT+=1
+) else (
+    echo FAIL: script should have failed on invalid path
+    set /a FAIL_COUNT+=1
+)
+goto :eof
+
+
+REM шестой тест - неверный порог
+:test_bad_x
+echo === Test 6: invalid threshold ===
+call :prepare_env
+call :generate_files 50 3
+
+call cleanup.bat %LOG_DRIVE%:\ abc
+if not errorlevel 1 (
+    echo FAIL: script should reject non-numeric threshold
+    set /a FAIL_COUNT+=1
+    goto :eof
+)
+
+call cleanup.bat %LOG_DRIVE%:\ 150
+if not errorlevel 1 (
+    echo FAIL: script should reject threshold over 100
+    set /a FAIL_COUNT+=1
+    goto :eof
+)
+
+echo PASS: invalid threshold - error handled
+set /a PASS_COUNT+=1
+goto :eof
+
+
+REM седьмой тест - проверка сохранности файлов в архивек
+:test_archive_fail_keeps_files
+echo === Test 7: archive failure keeps originals ===
+call :prepare_env
+call :generate_files 400 4 5
+
+for /f %%A in ('dir /b %LOG_DRIVE%:\ ^| find /c /v ""') do set FILES_BEFORE=%%A
+
+> "%TEMP%\detach_backup_only.txt" echo select vdisk file=%BACKUP_VHD%
+>> "%TEMP%\detach_backup_only.txt" echo detach vdisk
+diskpart /s "%TEMP%\detach_backup_only.txt" >nul
+
+call cleanup.bat %LOG_DRIVE%:\ 50
+if not errorlevel 1 (
+    echo FAIL: script should have failed when backup disk unavailable
+    set /a FAIL_COUNT+=1
+    goto :eof
+)
+
+for /f %%A in ('dir /b %LOG_DRIVE%:\ ^| find /c /v ""') do set FILES_AFTER=%%A
+
+if not "%FILES_BEFORE%"=="%FILES_AFTER%" (
+    echo FAIL: files changed despite archive failure was=%FILES_BEFORE% now=%FILES_AFTER%
+    set /a FAIL_COUNT+=1
+    goto :eof
+)
+
+echo PASS: archive failure - originals kept
 set /a PASS_COUNT+=1
 goto :eof
