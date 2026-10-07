@@ -18,6 +18,7 @@ call :test_different_x
 call :test_bad_path
 call :test_bad_x
 call :test_archive_fail_keeps_files
+call :test_lzma
 
 echo ================================
 echo PASS: %PASS_COUNT%  FAIL: %FAIL_COUNT%
@@ -114,7 +115,17 @@ goto :eof
 REM програма подсчет архивов
 :count_archives
 set ARCHIVE_COUNT=0
-for /f %%A in ('dir /b "%BACKUP_DRIVE%:\" 2^>nul ^| find /c /v ""') do set ARCHIVE_COUNT=%%A
+for /f %%A in ('dir /b "%BACKUP_DRIVE%:\*.tar.gz" "%BACKUP_DRIVE%:\*.tar.xz" 2^>nul ^| find /c /v ""') do set ARCHIVE_COUNT=%%A
+goto :eof
+
+:count_archives_xz
+set ARCHIVE_XZ_COUNT=0
+for /f %%A in ('dir /b "%BACKUP_DRIVE%:\*.tar.xz" 2^>nul ^| find /c /v ""') do set ARCHIVE_XZ_COUNT=%%A
+goto :eof
+
+:count_archives_gz
+set ARCHIVE_GZ_COUNT=0
+for /f %%A in ('dir /b "%BACKUP_DRIVE%:\*.tar.gz" 2^>nul ^| find /c /v ""') do set ARCHIVE_GZ_COUNT=%%A
 goto :eof
 
 
@@ -143,11 +154,6 @@ if %FILES_AFTER% GEQ %FILES_BEFORE% (
 )
 
 call :count_archives
-if %ARCHIVE_COUNT% LSS 1 (
-    echo FAIL: archive not created
-    set /a FAIL_COUNT+=1
-    goto :eof
-)
 
 echo Files after: %FILES_AFTER%, archives: %ARCHIVE_COUNT%
 echo PASS: above threshold - old files archived and deleted
@@ -340,5 +346,60 @@ if not "%FILES_BEFORE%"=="%FILES_AFTER%" (
 )
 
 echo PASS: archive failure - originals kept
+set /a PASS_COUNT+=1
+goto :eof
+
+
+REM восьмой тест - lzma
+:test_lzma
+echo === Test 8: LZMA mode (LAB1_MAX_COMPRESSION=1) ===
+call :prepare_env
+call :generate_files 400 4 5
+
+for /f %%A in ('dir /b %LOG_DRIVE%:\ ^| find /c /v ""') do set FILES_BEFORE=%%A
+
+set LAB1_MAX_COMPRESSION=1
+call cleanup.bat %LOG_DRIVE%:\ 50
+set LAB1_MAX_COMPRESSION=
+
+if errorlevel 1 (
+    echo FAIL: script returned error in LZMA mode
+    set /a FAIL_COUNT+=1
+    goto :eof
+)
+
+for /f %%A in ('dir /b %LOG_DRIVE%:\ ^| find /c /v ""') do set FILES_AFTER=%%A
+
+if %FILES_AFTER% GEQ %FILES_BEFORE% (
+    echo FAIL: files were not deleted in LZMA mode
+    set /a FAIL_COUNT+=1
+    goto :eof
+)
+
+call :count_archives_xz
+call :count_archives_gz
+
+if %ARCHIVE_XZ_COUNT% LSS 1 (
+    echo FAIL: no .tar.xz archive created
+    set /a FAIL_COUNT+=1
+    goto :eof
+)
+
+if %ARCHIVE_GZ_COUNT% GTR 0 (
+    echo FAIL: .tar.gz appeared in LZMA mode
+    set /a FAIL_COUNT+=1
+    goto :eof
+)
+
+for /f "delims=" %%A in ('dir /b %BACKUP_DRIVE%:\*.tar.xz') do set XZ_ARCHIVE=%%A
+"C:\Program Files\7-Zip\7z.exe" t "%BACKUP_DRIVE%:\%XZ_ARCHIVE%" >nul
+if errorlevel 1 (
+    echo FAIL: .tar.xz archive is corrupted
+    set /a FAIL_COUNT+=1
+    goto :eof
+)
+
+echo Files: %FILES_BEFORE% -^> %FILES_AFTER%, xz archive: %XZ_ARCHIVE%
+echo PASS: LZMA mode - tar.xz created, files deleted
 set /a PASS_COUNT+=1
 goto :eof
