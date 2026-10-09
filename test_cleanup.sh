@@ -1,11 +1,13 @@
 #!/bin/bash
-# test_cleanup.sh — автоматические тесты для cleanup.sh
-# Минимум 4 теста + ошибки + LZMA
+# test_cleanup.sh - автоматические тесты для cleanup.sh
+# минимум 4 теста, каждый с папкой >= 0.5 ГБ (+ ошибки + LZMA)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLEANUP_SCRIPT="${SCRIPT_DIR}/cleanup.sh"
+
+# не на /mnt/c и не в /tmp (tmpfs маленький) - иначе IO / no space
 TEST_ROOT="${HOME}/archios_test_env"
 
 LOG_DIR="${TEST_ROOT}/log"
@@ -16,6 +18,7 @@ BACKUP_LOOP=""
 PASS=0
 FAIL=0
 
+# цвета для красивого вывода
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 NC='\033[0m'
@@ -30,11 +33,12 @@ print_fail() {
     ((FAIL++)) || true
 }
 
-# число без пробелов (wc -l часто даёт ведущие пробелы)
+# число без пробелов 
 num() {
     tr -d '[:space:]'
 }
 
+# подсчёт файлов (игнорируем lost+found)
 count_files() {
     find "$1" -path '*/lost+found' -prune -o -type f -print 2>/dev/null | wc -l | num
 }
@@ -51,6 +55,7 @@ count_archives_gz() {
     find "$1" -path '*/lost+found' -prune -o -name "*.tar.gz" -print 2>/dev/null | wc -l | num
 }
 
+# вспомогательные функции
 cleanup_test_env() {
     if mountpoint -q "${TEST_ROOT}/log" 2>/dev/null; then
         sudo umount "${TEST_ROOT}/log" 2>/dev/null || true
@@ -74,8 +79,9 @@ create_virtual_disk() {
     local mount_point=$2
     local image_file="${TEST_ROOT}/$(basename "${mount_point}").img"
 
-    mkdir -p "${mount_point}" "${TEST_ROOT}"
-    echo "  → создаю образ ${size_mb} МБ..."
+    mkdir -p "${mount_point}"
+    mkdir -p "${TEST_ROOT}"
+    echo "  -> создаю образ ${size_mb} МБ..."
     dd if=/dev/zero of="${image_file}" bs=1M count="${size_mb}" status=none
 
     local loop_dev
@@ -97,10 +103,10 @@ setup_test_disks() {
     LOG_DIR="${TEST_ROOT}/log"
     BACKUP_DIR="${TEST_ROOT}/backup"
 
-    echo "Создаю диск для логов (${log_size_mb} МБ)..."
+    echo "Создаётся диск для логов (${log_size_mb} МБ)"
     LOG_LOOP=$(create_virtual_disk "${log_size_mb}" "${LOG_DIR}")
 
-    echo "Создаю диск для архивов (${backup_size_mb} МБ)..."
+    echo "Создаётся диск для архивов (${backup_size_mb} МБ)"
     BACKUP_LOOP=$(create_virtual_disk "${backup_size_mb}" "${BACKUP_DIR}")
 
     export BACKUP_DIR
@@ -118,8 +124,7 @@ generate_test_files() {
         mb_per_file=1
     fi
 
-    echo "Генерирую ${file_count} файлов примерно по ${mb_per_file} МБ..."
-
+    echo "Генерируется ${file_count} файлов примерно по ${mb_per_file} МБ"
     for i in $(seq 1 "${file_count}"); do
         local file="${LOG_DIR}/file_${i}.dat"
         dd if=/dev/zero of="${file}" bs=1M count="${mb_per_file}" status=none 2>/dev/null
@@ -132,8 +137,9 @@ generate_test_files() {
     du -sh "${LOG_DIR}" 2>/dev/null || true
 }
 
+# тесты
 test_below_threshold() {
-    echo "=== Тест 1: папка заполнена меньше X% ==="
+    echo "Тест 1: папка заполнена меньше х%"
     setup_test_disks 1024 512
     generate_test_files 100 0 5
 
@@ -160,12 +166,12 @@ test_below_threshold() {
         return
     fi
 
-    print_pass "Ниже порога — ничего не изменилось"
+    print_pass "Ниже порога - ничего не изменилось"
     cleanup_test_env
 }
 
 test_above_threshold() {
-    echo "=== Тест 2: папка заполнена больше X% ==="
+    echo "Тест 2: папка заполнена больше х%"
     setup_test_disks 1024 512
     generate_test_files 800 5 8
 
@@ -194,14 +200,15 @@ test_above_threshold() {
     fi
 
     echo "Файлов после очистки: ${files_after}, архивов: ${archives}"
-    print_pass "Выше порога — старые файлы архивированы и удалены"
+    print_pass "Выше порога - старые файлы архивированы и удалены"
     cleanup_test_env
 }
 
 test_oldest_first() {
-    echo "=== Тест 3: архивируются самые старые файлы ==="
+    echo "Тест 3: архивируются самые старые файлы"
     setup_test_disks 1024 512
 
+    # старые (должны удалиться)
     dd if=/dev/zero of="${LOG_DIR}/old_1.dat" bs=1M count=150 status=none
     touch -d "10 days ago" "${LOG_DIR}/old_1.dat"
     dd if=/dev/zero of="${LOG_DIR}/old_2.dat" bs=1M count=150 status=none
@@ -209,6 +216,7 @@ test_oldest_first() {
     dd if=/dev/zero of="${LOG_DIR}/old_3.dat" bs=1M count=150 status=none
     touch -d "8 days ago" "${LOG_DIR}/old_3.dat"
 
+    # новые (должны остаться)
     dd if=/dev/zero of="${LOG_DIR}/new_1.dat" bs=1M count=150 status=none
     touch -d "1 day ago" "${LOG_DIR}/new_1.dat"
     dd if=/dev/zero of="${LOG_DIR}/new_2.dat" bs=1M count=150 status=none
@@ -233,7 +241,7 @@ test_oldest_first() {
     done
     archives=$(count_archives "${BACKUP_DIR}")
 
-    echo "Старых осталось: ${old_left}, новых: ${new_left}, архивов: ${archives}"
+    echo "Старых файлов осталось: ${old_left}, новых: ${new_left}, архивов: ${archives}"
 
     if [[ "${old_left}" -gt 0 ]]; then
         print_fail "Старые файлы не были удалены (осталось ${old_left})"
@@ -241,7 +249,7 @@ test_oldest_first() {
         return
     fi
     if [[ "${new_left}" -lt 2 ]]; then
-        print_fail "Слишком много новых удалено (осталось ${new_left})"
+        print_fail "Слишком много новых файлов удалено (осталось ${new_left})"
         cleanup_test_env
         return
     fi
@@ -256,15 +264,16 @@ test_oldest_first() {
 }
 
 test_different_x() {
-    echo "=== Тест 4: другое значение X ==="
+    echo "Тест 4: другое значение х"
     setup_test_disks 1024 512
     generate_test_files 700 3 7
 
     local files_before files_after_high files_after_low archives
     files_before=$(count_files "${LOG_DIR}")
 
+    # высокий порог - ничего не удаляем
     if ! BACKUP_DIR="${BACKUP_DIR}" bash "${CLEANUP_SCRIPT}" "${LOG_DIR}" 95; then
-        print_fail "Ошибка при высоком пороге"
+        print_fail "Скрипт завершился с ошибкой при высоком пороге"
         cleanup_test_env
         return
     fi
@@ -275,8 +284,9 @@ test_different_x() {
         return
     fi
 
+    # низкий порог - должно что-то удалиться
     if ! BACKUP_DIR="${BACKUP_DIR}" bash "${CLEANUP_SCRIPT}" "${LOG_DIR}" 30; then
-        print_fail "Ошибка при низком пороге"
+        print_fail "Скрипт завершился с ошибкой при низком пороге"
         cleanup_test_env
         return
     fi
@@ -294,42 +304,43 @@ test_different_x() {
         return
     fi
 
-    echo "Было: ${files_before}, после 95%: ${files_after_high}, после 30%: ${files_after_low}"
-    print_pass "Разные значения X работают правильно"
+    echo "Было файлов: ${files_before}, после высокого х: ${files_after_high}, после низкого х: ${files_after_low}"
+    print_pass "Разные значения х работают корректно"
     cleanup_test_env
 }
 
 test_bad_path() {
-    echo "=== Тест: неверный путь ==="
+    echo "Тест: неверный путь"
     if bash "${CLEANUP_SCRIPT}" "/net/takoy/papki" 50 2>/dev/null; then
-        print_fail "Не должен успешно завершаться на несуществующем пути"
+        print_fail "Скрипт не должен был успешно завершиться на несуществующем пути"
     else
-        print_pass "Неверный путь — ошибка обработана"
+        print_pass "Неверный путь - ошибка обработана"
     fi
 }
 
 test_bad_x() {
-    echo "=== Тест: неверный X ==="
+    echo "Тест: неверный х"
     setup_test_disks 512 256
     generate_test_files 50 0 3
 
     if BACKUP_DIR="${BACKUP_DIR}" bash "${CLEANUP_SCRIPT}" "${LOG_DIR}" abc 2>/dev/null; then
-        print_fail "Не должен принять нечисловой X"
+        print_fail "Скрипт не должен был принять нечисловой х"
         cleanup_test_env
         return
     fi
     if BACKUP_DIR="${BACKUP_DIR}" bash "${CLEANUP_SCRIPT}" "${LOG_DIR}" 150 2>/dev/null; then
-        print_fail "Не должен принять X > 100"
+        print_fail "Скрипт не должен был принять х > 100"
         cleanup_test_env
         return
     fi
 
-    print_pass "Неверный X — ошибка обработана"
+    print_pass "Неверный х - ошибка обработана"
     cleanup_test_env
 }
 
+# если архив создать нельзя - файлы в log не удаляются
 test_archive_fail_keeps_files() {
-    echo "=== Тест: ошибка архивации — оригиналы на месте ==="
+    echo "Тест: ошибка архивации - оригиналы на месте"
     setup_test_disks 1024 512
     generate_test_files 800 5 8
 
@@ -349,7 +360,7 @@ test_archive_fail_keeps_files() {
     after=$(count_files "${LOG_DIR}")
 
     if [[ "${after}" -ne "${before}" ]]; then
-        print_fail "Файлы изменились при ошибке архивации (${before} → ${after})"
+        print_fail "Файлы изменились при ошибке архивации (было ${before}, стало ${after})"
         cleanup_test_env
         return
     fi
@@ -358,8 +369,9 @@ test_archive_fail_keeps_files() {
     cleanup_test_env
 }
 
+# LAB1_MAX_COMPRESSION=1 -> архив .tar.xz
 test_lzma() {
-    echo "=== Тест: режим LZMA (LAB1_MAX_COMPRESSION=1) ==="
+    echo "Тест: режим LZMA (LAB1_MAX_COMPRESSION=1)"
     setup_test_disks 1024 512
     generate_test_files 800 5 8
 
@@ -377,22 +389,21 @@ test_lzma() {
     gz_count=$(count_archives_gz "${BACKUP_DIR}")
 
     if [[ "${after}" -ge "${before}" ]]; then
-        print_fail "Файлы не удалились (${before} → ${after})"
+        print_fail "Файлы не удалились (было ${before}, стало ${after})"
         cleanup_test_env
         return
     fi
     if [[ "${xz_count}" -lt 1 ]]; then
-        print_fail "Нет архива .tar.xz (xz=${xz_count}, gz=${gz_count})"
+        print_fail "Не создан архив .tar.xz (xz=${xz_count}, gz=${gz_count})"
         cleanup_test_env
         return
     fi
     if [[ "${gz_count}" -gt 0 ]]; then
-        print_fail "В режиме LZMA появился .tar.gz"
+        print_fail "В режиме LZMA появился .tar.gz - ожидался только .tar.xz"
         cleanup_test_env
         return
     fi
 
-    # без pipefail-ловушки find|head
     arch=$(find "${BACKUP_DIR}" -name "*.tar.xz" -print -quit 2>/dev/null || true)
     if [[ -z "${arch}" ]]; then
         print_fail "Файл .tar.xz не найден"
@@ -405,14 +416,14 @@ test_lzma() {
         return
     fi
 
-    echo "Файлов: ${before} → ${after}, архив: ${arch}"
+    echo "Файлов: ${before} -> ${after}, архив: ${arch}"
     print_pass "LZMA: создан .tar.xz, файлы удалены"
     cleanup_test_env
 }
 
+# запуск
 main() {
     echo "Запуск тестов cleanup.sh"
-    echo "========================="
 
     if [[ ! -f "${CLEANUP_SCRIPT}" ]]; then
         echo "Ошибка: не найден ${CLEANUP_SCRIPT}"
@@ -428,8 +439,7 @@ main() {
     test_archive_fail_keeps_files
     test_lzma
 
-    echo "========================="
-    echo "Итого: PASS=${PASS}  FAIL=${FAIL}"
+    echo "Итог: PASS=${PASS}  FAIL=${FAIL}"
     cleanup_test_env
 
     if [[ ${FAIL} -gt 0 ]]; then
